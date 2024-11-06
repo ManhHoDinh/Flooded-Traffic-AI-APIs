@@ -5,3 +5,8 @@ RUN apt update && \
 
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+COPY . .
+
+CMD ["uvicorn", "main:app", "--reload", "--host", "0.0.0.0", "--port", "8001"]
+EXPOSE 8001

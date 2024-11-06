@@ -5,18 +5,21 @@ from PIL import Image
 from loguru import logger
 import sys
 
-from fastapi import FastAPI, File, status
+from fastapi import FastAPI, File, status, BackgroundTasks
 from fastapi.responses import RedirectResponse
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import HTTPException
-
+import asyncio
 from io import BytesIO
 
 from test import get_image_from_bytes
 from test import detect_sample_model
 from test import add_bboxs_on_img
 from test import get_bytes_from_image
+import httpx
+import time
+import os
 
 ####################################### logger #################################
 
@@ -57,8 +60,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+async def fetch_cameras():
+    url = "https://api.notis.vn/v4/cameras/bybbox?lat1=11.160767&lng1=106.554166&lat2=9.45&lng2=128.99999"
+    headers = {
+        'accept': 'application/json',
+        'device-id': 'bf738a0a3e6eddc2',
+        'origin': 'http://localhost',
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, headers=headers)
+        return response.json()
+
+async def get_image_and_detect(url):
+    print("URL: ",url)
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url)
+            if response.status_code == 200:
+                image_bytes = response.content
+                # Xử lý image_bytes với chức năng detect
+                input_image = get_image_from_bytes(image_bytes)
+                predict = detect_sample_model(input_image)
+                logger.info("Detection result: {}", predict)
+            else:
+                logger.error("Failed to fetch image, status code: {}", response.status_code)
+    except Exception as e:
+        logger.error("Error in fetching or detecting image: {}", e)
+
+async def process_camera_images(duration_in_seconds=60):
+    camera_list = await fetch_cameras()    
+    print("Camera Length: ",len(camera_list))
+    start = os.getenv("START")
+    end = os.getenv("END")
+    
+    if start is None or end is None:
+        print("START and END environment variables are required")
+    else:
+        try:
+            start = int(start)
+            end = int(end)
+        except ValueError:
+            print("START and END must be integers")
+            start, end = 0, len(camera_list)  # Gán giá trị mặc định nếu lỗi
+
+        if 0 <= start < len(camera_list) and 0 < end <= len(camera_list):
+            camera_list = camera_list[start:end + 1]
+            print("Start: ", start)
+            print("End: ", end)
+        else:
+            print("START and END must be within valid range")
+
+    start_time = time.time()
+    while time.time() - start_time < duration_in_seconds:
+        tasks = []
+        for camera in camera_list:
+            url = f"http://giaothong.hochiminhcity.gov.vn/render/ImageHandler.ashx?id={camera['_id']}"
+            tasks.append(get_image_and_detect(url))
+        await asyncio.gather(*tasks)
+        await asyncio.sleep(5)  
+
+async def periodic_task():
+    while True:
+        print("Thực hiện nhiệm vụ.")
+        await process_camera_images()
+        print("Xử lý xong.")
+        await asyncio.sleep(5)  # Đợi 60 giây trước khi thực hiện nhiệm vụ tiếp theo
 @app.on_event("startup")
-def save_openapi_json():
+async def save_openapi_json():
     '''This function is used to save the OpenAPI documentation 
     data of the FastAPI application to a JSON file. 
     The purpose of saving the OpenAPI documentation data is to have 
@@ -66,6 +134,7 @@ def save_openapi_json():
     which can be used for documentation purposes or 
     to generate client libraries. It is not necessarily needed, 
     but can be helpful in certain scenarios.'''
+    asyncio.create_task(periodic_task())
     openapi_data = app.openapi()
     # Change "openapi.json" to desired filename
     with open("openapi.json", "w") as file:
